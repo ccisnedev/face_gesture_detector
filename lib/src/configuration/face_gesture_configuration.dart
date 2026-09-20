@@ -52,6 +52,47 @@ class FaceGestureConfiguration {
   /// Disabled by default to reduce memory (~8KB per frame).
   final bool includeLandmarks;
 
+  // ── Capture gates (CaptureReadyRecognizer) ────────
+
+  /// Require |yaw| ≤ [captureMaxYaw] and |pitch| ≤ [captureMaxPitch].
+  final bool captureRequireFrontal;
+
+  /// Maximum absolute yaw (degrees) accepted for capture.
+  final double captureMaxYaw;
+
+  /// Maximum absolute pitch (degrees) accepted for capture.
+  final double captureMaxPitch;
+
+  /// Require the face box ratio to lie within
+  /// [minDistanceRatio]..[maxDistanceRatio].
+  final bool captureRequireOptimalDistance;
+
+  /// Minimum frame brightness (0..1) accepted for capture.
+  final double captureMinBrightness;
+
+  /// Maximum frame brightness (0..1) accepted for capture.
+  final double captureMaxBrightness;
+
+  /// Minimum Laplacian-variance sharpness of the face region accepted for
+  /// capture. Measured natively on the NV21 Y plane, subsampled to ~160
+  /// columns (see `QualityMetrics`).
+  ///
+  /// Reference values (Samsung A04 front camera, 2026-09): a texture-less
+  /// scene (blank ceiling, no face) measures 8–40 on the live 720p/1080p
+  /// stream and 55–120 on the processed photo of the same scene. Faces
+  /// have not been measured yet; the default of 60 is **provisional** and
+  /// must be calibrated on the target device matrix with real users.
+  final double captureMinSharpness;
+
+  /// Require both eyes open (blink blendshapes below [blinkThreshold]).
+  final bool captureRequireEyesOpen;
+
+  /// Require the mouth closed (`jawOpen` below [mouthOpenThreshold]).
+  final bool captureRequireMouthClosed;
+
+  /// How long every capture gate must hold before `onCaptureReady` fires.
+  final Duration captureSustainedDuration;
+
   const FaceGestureConfiguration({
     this.faceDetectionConfidence = 0.5,
     this.minDistanceRatio = 0.05,
@@ -65,5 +106,15 @@ class FaceGestureConfiguration {
     this.sustainedGestureDuration = const Duration(milliseconds: 400),
     this.frameSkipCount = 2,
     this.includeLandmarks = false,
+    this.captureRequireFrontal = true,
+    this.captureMaxYaw = 15.0,
+    this.captureMaxPitch = 15.0,
+    this.captureRequireOptimalDistance = true,
+    this.captureMinBrightness = 0.25,
+    this.captureMaxBrightness = 0.80,
+    this.captureMinSharpness = 60.0,
+    this.captureRequireEyesOpen = true,
+    this.captureRequireMouthClosed = false,
+    this.captureSustainedDuration = const Duration(milliseconds: 600),
   });
 }

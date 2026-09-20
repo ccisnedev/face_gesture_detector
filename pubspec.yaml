@@ -1,6 +1,6 @@
 name: face_gesture_detector
 description: "A widget that detects face gestures, inspired by Flutter's GestureDetector class."
-version: 0.2.5
+version: 0.3.0
 repository: https://github.com/macss-dev/face_gesture_detector
 
 environment:

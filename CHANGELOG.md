@@ -4,10 +4,32 @@ All notable changes to this project will be documented in this file.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## 0.2.4
+## 0.3.0
+
+Photo capture, real image-quality metrics and Google Play 16 KB compliance.
+(0.2.4 / 0.2.5 were internal, never published.)
+
+### Added
+- **Photo capture**: `FaceGestureDetectorController.capturePhoto({CaptureOptions})` takes a picture with the attached `CameraController` and post-processes it natively — EXIF orientation, optional mirror, crop around the last detected face (with margin and aspect ratio), downscale to `targetShortSide` (never upscale), JPEG re-encode and quality metrics of the result. Returns a `CapturedPhoto` (`path`, `width`, `height`, `faceRect`, `pose`, `quality`, `cropApplied`, `capturedAt`). `CaptureOptions.timeout` (10 s) bounds `takePicture()` and the native processing; the image stream is restarted even when the capture fails or times out.
+- **`CaptureReadyRecognizer`** with `onCaptureReady` / `onCaptureBlocked` callbacks on `FaceGestureDetector`: evaluates face presence, frontal pose, distance, brightness, sharpness, eyes open and (optionally) mouth closed on every frame; `onCaptureBlocked` reports the changing set of `CaptureBlockReason`s (an empty set means "hold still"), `onCaptureReady` fires once per episode after `captureSustainedDuration`.
+- `FaceGestureConfiguration` capture gates: `captureRequireFrontal`, `captureMaxYaw`, `captureMaxPitch`, `captureRequireOptimalDistance`, `captureMinBrightness`, `captureMaxBrightness`, `captureMinSharpness`, `captureRequireEyesOpen`, `captureRequireMouthClosed`, `captureSustainedDuration`.
+- `FaceFrame.frameWidth` / `frameHeight` (size of the raw camera frame the bounding box refers to), reported by the native layer.
+- `FaceGestureDetectorController.isAttached`, `isCapturing`, `lastFrame`; `FaceCaptureHost` contract implemented by `RawFaceGestureDetectorState`.
+- `mapSensorRectToUpright()` — maps a rect from the raw sensor frame to the upright image for a given `sensorOrientation`.
+- `CameraCaptureAdapter` / `CameraControllerCaptureAdapter` (camera seam used by capture; injectable in tests via `RawFaceGestureDetectorState.debugCaptureAdapter`).
+- Platform interface: `processCapturedPhoto(Map args)`; native `PhotoProcessor` (Kotlin) and `QualityMetrics` (pure Kotlin, JVM-tested).
+- Example app: Capture button, Auto-capture switch, live gate status and metrics overlay, thumbnail of the last capture; integration test `capture_integration_test.dart`.
 
 ### Changed
-- Bumped `camera` dependency from `^0.11.1` to `^0.12.0`
+- **MediaPipe `tasks-vision` 0.10.21 → 0.10.26.1**. 0.10.21 shipped `libmediapipe_tasks_vision_jni.so` aligned to 4 KB pages, which Google Play rejects for apps targeting Android 15+ (16 KB page-size requirement, enforced since 2025-11-01). 0.10.26.1 is aligned to 16 KB. Consumer apps need AGP ≥ 8.5.1 and `useLegacyPackaging = false` (the default when `minSdk ≥ 23`).
+- **Real quality metrics**: `ImageQualityMetrics.brightness` (mean of the NV21 Y plane, subsampled) and `sharpness` (variance of the Laplacian inside the face box, subsampled to ~160 columns) are now measured natively on the exact frame each result belongs to. They were hard-coded to `0.5` / `100.0` before.
+- `QualityGateRecognizer` uses `captureMin/MaxBrightness` and `captureMinSharpness` for `isSufficientForCapture`, and the real frame size (when reported) for the distance ratio.
+- Frames received while a capture is in progress are remembered as `lastFrame` but not dispatched to recognizers.
+- Bumped `camera` dependency from `^0.11.1` to `^0.12.0`; added `androidx.exifinterface:exifinterface:1.4.1`.
+- Example app camera preset `medium` → `high`.
+
+### Fixed
+- Distance classification no longer assumes a 1280×720 frame when the native layer reports the real size.
 
 ---
 

@@ -45,6 +45,11 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
 }
 
 dependencies {
-    "implementation"("com.google.mediapipe:tasks-vision:0.10.21")
+    // 0.10.26+ ships native libraries (libmediapipe_tasks_vision_jni.so)
+    // aligned to 16 KB pages — required by Google Play for apps targeting
+    // Android 15+ since 2025-11-01. 0.10.21 was aligned to 4 KB.
+    "implementation"("com.google.mediapipe:tasks-vision:0.10.26.1")
+    // EXIF orientation of captured JPEGs (processCapturedPhoto).
+    "implementation"("androidx.exifinterface:exifinterface:1.4.1")
     "testImplementation"("junit:junit:4.13.2")
 }

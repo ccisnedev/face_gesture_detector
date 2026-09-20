@@ -5,6 +5,7 @@ import '../configuration/face_gesture_configuration.dart';
 import '../controller/face_gesture_detector_controller.dart';
 import '../model/details/blink_details.dart';
 import '../model/details/brow_details.dart';
+import '../model/details/capture_ready_details.dart';
 import '../model/details/distance_details.dart';
 import '../model/details/face_detected_details.dart';
 import '../model/details/head_nod_details.dart';
@@ -16,6 +17,7 @@ import '../model/details/smile_details.dart';
 import '../model/face_frame.dart';
 import '../recognizer/blink_recognizer.dart';
 import '../recognizer/brow_recognizer.dart';
+import '../recognizer/capture_ready_recognizer.dart';
 import '../recognizer/face_gesture_recognizer_factory.dart';
 import '../recognizer/face_presence_recognizer.dart';
 import '../recognizer/head_nod_recognizer.dart';
@@ -76,6 +78,18 @@ class FaceGestureDetector extends StatelessWidget {
   // ── Family: Head Nod ────────────────────────────────
   final ValueChanged<HeadNodDetails>? onHeadNodDetected;
 
+  // ── Family: Capture ─────────────────────────────────
+
+  /// Fires once when every capture gate (face, frontal pose, distance,
+  /// brightness, sharpness, eyes open, …) has held for
+  /// `captureSustainedDuration`. Typically followed by
+  /// `controller.capturePhoto()`.
+  final ValueChanged<CaptureReadyDetails>? onCaptureReady;
+
+  /// Fires when the set of failing capture gates changes. An empty list
+  /// means all gates pass and the sustained timer is running.
+  final ValueChanged<CaptureBlockedDetails>? onCaptureBlocked;
+
   // ── Raw Data ────────────────────────────────────────
   final ValueChanged<FaceFrame>? onFaceFrame;
 
@@ -100,6 +114,8 @@ class FaceGestureDetector extends StatelessWidget {
     this.onBrowRaised,
     this.onHeadTurnDetected,
     this.onHeadNodDetected,
+    this.onCaptureReady,
+    this.onCaptureBlocked,
     this.onFaceFrame,
     this.controller,
     this.child,
@@ -171,6 +187,14 @@ class FaceGestureDetector extends StatelessWidget {
       recognizers[HeadNodRecognizer] = _HeadNodFactory(
         configuration: configuration,
         onHeadNodDetected: onHeadNodDetected!,
+      );
+    }
+
+    if (onCaptureReady != null || onCaptureBlocked != null) {
+      recognizers[CaptureReadyRecognizer] = _CaptureReadyFactory(
+        configuration: configuration,
+        onCaptureReady: onCaptureReady,
+        onCaptureBlocked: onCaptureBlocked,
       );
     }
 
@@ -330,6 +354,26 @@ class _HeadNodFactory extends FaceGestureRecognizerFactory<HeadNodRecognizer> {
   HeadNodRecognizer create() => HeadNodRecognizer(
     configuration: configuration,
     onHeadNodDetected: onHeadNodDetected,
+  );
+}
+
+class _CaptureReadyFactory
+    extends FaceGestureRecognizerFactory<CaptureReadyRecognizer> {
+  final FaceGestureConfiguration configuration;
+  final ValueChanged<CaptureReadyDetails>? onCaptureReady;
+  final ValueChanged<CaptureBlockedDetails>? onCaptureBlocked;
+
+  _CaptureReadyFactory({
+    required this.configuration,
+    this.onCaptureReady,
+    this.onCaptureBlocked,
+  });
+
+  @override
+  CaptureReadyRecognizer create() => CaptureReadyRecognizer(
+    configuration: configuration,
+    onCaptureReady: onCaptureReady ?? (_) {},
+    onCaptureBlocked: onCaptureBlocked ?? (_) {},
   );
 }
 

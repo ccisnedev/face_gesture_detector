@@ -53,4 +53,15 @@ abstract class FaceGestureDetectorPlatform extends PlatformInterface {
   Stream<Map<String, dynamic>> get faceFrameStream {
     throw UnimplementedError('faceFrameStream has not been implemented.');
   }
+
+  /// Post-processes a JPEG produced by `CameraController.takePicture()`:
+  /// applies EXIF orientation, optional mirroring, crops around the face,
+  /// downscales, re-encodes and measures quality.
+  ///
+  /// [args] is built by `CaptureOptions.toPlatformMap`. The reply contains
+  /// `path`, `width`, `height`, `brightness`, `sharpness`, `cropApplied`
+  /// (see `CapturedPhoto.fromPlatformMap`).
+  Future<Map<String, dynamic>> processCapturedPhoto(Map<String, dynamic> args) {
+    throw UnimplementedError('processCapturedPhoto() has not been implemented.');
+  }
 }

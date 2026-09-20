@@ -1,6 +1,8 @@
 package dev.macss.face_gesture_detector
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -28,6 +30,7 @@ class FaceGestureDetectorPlugin : FlutterPlugin, MethodCallHandler {
 
     private var engine: FaceLandmarkerEngine? = null
     private var backgroundExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var isRunning = false
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -45,6 +48,7 @@ class FaceGestureDetectorPlugin : FlutterPlugin, MethodCallHandler {
             "startDetection" -> handleStartDetection(call, result)
             "stopDetection" -> handleStopDetection(result)
             "processFrame" -> handleProcessFrame(call, result)
+            "processCapturedPhoto" -> handleProcessCapturedPhoto(call, result)
             else -> result.notImplemented()
         }
     }
@@ -110,7 +114,58 @@ class FaceGestureDetectorPlugin : FlutterPlugin, MethodCallHandler {
         backgroundExecutor.submit {
             val rawFrame = frameBuffer.acquire() ?: return@submit
             val mpImage = FrameDecoder.decode(rawFrame.bytes, rawFrame.width, rawFrame.height)
-            engine?.detectAsync(mpImage, rawFrame.timestampMs, rawFrame.rotation)
+            // The NV21 bytes travel with the frame so the engine can measure
+            // brightness/sharpness on the exact frame the result belongs to.
+            engine?.detectAsync(
+                mpImage, rawFrame.timestampMs, rawFrame.rotation,
+                rawFrame.bytes, rawFrame.width, rawFrame.height,
+            )
+        }
+    }
+
+    /**
+     * Post-processes a JPEG taken with `CameraController.takePicture()`:
+     * EXIF orientation, optional mirror, crop around the face, downscale,
+     * re-encode and quality metrics. Runs on the background executor and
+     * answers on the main thread.
+     */
+    private fun handleProcessCapturedPhoto(call: MethodCall, result: Result) {
+        val path = call.argument<String>("path")
+        if (path.isNullOrBlank()) {
+            result.error("INVALID_ARGUMENT", "path is required", null)
+            return
+        }
+
+        val faceRectMap = call.argument<Map<String, Any?>>("faceRect")
+        val faceRect = faceRectMap?.let { map ->
+            NormalizedRect(
+                left = (map["left"] as? Number)?.toDouble() ?: 0.0,
+                top = (map["top"] as? Number)?.toDouble() ?: 0.0,
+                width = (map["width"] as? Number)?.toDouble() ?: 0.0,
+                height = (map["height"] as? Number)?.toDouble() ?: 0.0,
+            )
+        }
+
+        val args = CaptureProcessingArgs(
+            path = path,
+            mirror = call.argument<Boolean>("mirror") ?: false,
+            faceRect = faceRect,
+            marginFactor = (call.argument<Number>("marginFactor") ?: 0.6).toDouble(),
+            aspectRatio = call.argument<Number>("aspectRatio")?.toDouble(),
+            targetShortSide = call.argument<Int>("targetShortSide") ?: 1080,
+            jpegQuality = call.argument<Int>("jpegQuality") ?: 92,
+            outputDir = call.argument<String>("outputDir"),
+        )
+
+        backgroundExecutor.submit {
+            try {
+                val map = PhotoProcessor.process(applicationContext, args)
+                mainHandler.post { result.success(map) }
+            } catch (e: Exception) {
+                mainHandler.post {
+                    result.error("PROCESSING_FAILED", e.message ?: e.javaClass.simpleName, null)
+                }
+            }
         }
     }
 

@@ -60,5 +60,37 @@ void main() {
       final stream = platform.faceFrameStream;
       expect(stream, isA<Stream<Map<String, dynamic>>>());
     });
+
+    test('processCapturedPhoto forwards args and returns the reply', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methodChannel, (call) async {
+            capturedCalls.add(call);
+            return <Object?, Object?>{
+              'path': '/cache/out.jpg',
+              'width': 810,
+              'height': 1080,
+              'brightness': 0.4,
+              'sharpness': 123.0,
+              'cropApplied': true,
+            };
+          });
+
+      final args = const CaptureOptions().toPlatformMap(path: '/tmp/in.jpg');
+      final reply = await platform.processCapturedPhoto(args);
+
+      expect(capturedCalls.single.method, 'processCapturedPhoto');
+      expect(capturedCalls.single.arguments['path'], '/tmp/in.jpg');
+      expect(capturedCalls.single.arguments['targetShortSide'], 1080);
+      expect(reply['path'], '/cache/out.jpg');
+      expect(reply['width'], 810);
+      expect(reply['cropApplied'], isTrue);
+    });
+
+    test('processCapturedPhoto throws when native returns nothing', () async {
+      expect(
+        () => platform.processCapturedPhoto({'path': 'x'}),
+        throwsA(isA<PlatformException>()),
+      );
+    });
   });
 }
