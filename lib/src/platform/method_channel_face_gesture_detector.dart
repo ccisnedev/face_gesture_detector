@@ -41,4 +41,21 @@ class MethodChannelFaceGestureDetector extends FaceGestureDetectorPlatform {
     );
     return _frameStream!;
   }
+
+  @override
+  Future<Map<String, dynamic>> processCapturedPhoto(
+    Map<String, dynamic> args,
+  ) async {
+    final reply = await _methodChannel.invokeMethod<Map<Object?, Object?>>(
+      'processCapturedPhoto',
+      args,
+    );
+    if (reply == null) {
+      throw PlatformException(
+        code: 'NO_RESULT',
+        message: 'processCapturedPhoto returned no result',
+      );
+    }
+    return Map<String, dynamic>.from(reply);
+  }
 }

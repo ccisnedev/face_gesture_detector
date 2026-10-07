@@ -455,6 +455,10 @@ abstract class FaceGestureDetectorPlatform extends PlatformInterface {
 
   /// Stream of FaceFrame produced by the native pipeline.
   Stream<Map<String, dynamic>> get faceFrameStream;
+
+  /// Post-processes a JPEG from takePicture(): EXIF orientation, mirror,
+  /// face crop, downscale, JPEG re-encode, quality metrics (see §14).
+  Future<Map<String, dynamic>> processCapturedPhoto(Map<String, dynamic> args);
 }
 ```
 
@@ -697,12 +701,14 @@ face_gesture_detector/
 │   └── src/
 │       ├── widget/
 │       │   ├── face_gesture_detector.dart      ← Layer 1: StatelessWidget facade
-│       │   └── raw_face_gesture_detector.dart  ← Layer 2: StatefulWidget lifecycle
+│       │   ├── raw_face_gesture_detector.dart  ← Layer 2: StatefulWidget lifecycle + capture host
+│       │   └── camera_capture_adapter.dart     ← Camera seam used by capturePhoto
 │       ├── recognizer/
 │       │   ├── face_gesture_recognizer.dart    ← Abstract base class
 │       │   ├── face_gesture_recognizer_factory.dart
 │       │   ├── face_presence_recognizer.dart
 │       │   ├── quality_gate_recognizer.dart
+│       │   ├── capture_ready_recognizer.dart   ← Capture gates
 │       │   ├── pose_recognizer.dart
 │       │   ├── blink_recognizer.dart
 │       │   ├── smile_recognizer.dart
@@ -712,6 +718,7 @@ face_gesture_detector/
 │       │   └── raw_frame_recognizer.dart
 │       ├── model/
 │       │   ├── face_frame.dart
+│       │   ├── captured_photo.dart             ← CaptureOptions, CapturedPhoto
 │       │   ├── pose_angles.dart
 │       │   ├── image_quality_metrics.dart
 │       │   ├── face_blendshape.dart
@@ -720,6 +727,7 @@ face_gesture_detector/
 │       │       ├── face_detected_details.dart
 │       │       ├── quality_details.dart
 │       │       ├── distance_details.dart
+│       │       ├── capture_ready_details.dart  ← CaptureBlockReason, Ready/Blocked details
 │       │       ├── pose_details.dart
 │       │       ├── blink_details.dart
 │       │       ├── smile_details.dart
@@ -730,7 +738,9 @@ face_gesture_detector/
 │       ├── configuration/
 │       │   └── face_gesture_configuration.dart
 │       ├── controller/
-│       │   └── face_gesture_detector_controller.dart
+│       │   └── face_gesture_detector_controller.dart  ← + FaceCaptureHost, capturePhoto
+│       ├── util/
+│       │   └── rect_mapping.dart               ← mapSensorRectToUpright
 │       └── platform/
 │           ├── face_gesture_detector_platform_interface.dart
 │           ├── method_channel_face_gesture_detector.dart
@@ -742,7 +752,9 @@ face_gesture_detector/
 │   ├── FaceFrameStreamHandler.kt
 │   ├── SingleSlotFrameBuffer.kt
 │   ├── FrameDecoder.kt
-│   └── EulerAngleCalculator.kt
+│   ├── EulerAngleCalculator.kt
+│   ├── QualityMetrics.kt                       ← brightness / sharpness (pure Kotlin)
+│   └── PhotoProcessor.kt                       ← processCapturedPhoto pipeline
 │
 └── test/
     ├── widget/
@@ -758,6 +770,62 @@ face_gesture_detector/
         ├── face_frame_test.dart
         └── pose_angles_test.dart
 ```
+
+---
+
+## 14. Photo Capture
+
+Detection tells the app *when* the face is good; capture produces the
+*picture* itself. Both stay inside the layer model:
+
+| Piece | Layer | Responsibility |
+|-------|-------|----------------|
+| `CaptureReadyRecognizer` | 3 | Evaluates the capture gates on every `FaceFrame` and emits `onCaptureBlocked` (set of `CaptureBlockReason`s changed) / `onCaptureReady` (gates held for `captureSustainedDuration`) |
+| `FaceGestureDetectorController.capturePhoto()` | 1 | Public entry point; guards against concurrent captures and delegates to the attached `FaceCaptureHost` |
+| `RawFaceGestureDetectorState` (as `FaceCaptureHost`) | 2 | Suspends dispatch, stops/restarts the image stream, calls `takePicture()`, maps the last face box to upright coordinates and invokes the platform |
+| `FaceGestureDetectorPlatform.processCapturedPhoto()` | 4 | Contract for the native post-processing |
+| `PhotoProcessor` + `QualityMetrics` (Kotlin) | 5 | EXIF orientation → mirror → crop → downscale → JPEG → brightness/sharpness of the result |
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant C as Controller (L1)
+    participant S as RawFaceGestureDetectorState (L2)
+    participant Cam as CameraController
+    participant N as PhotoProcessor (L5)
+
+    App->>C: capturePhoto(options)
+    C->>S: capturePhoto(options)
+    S->>S: suspend dispatch, keep lastFrame
+    S->>Cam: stopImageStream()
+    S->>Cam: takePicture()
+    Cam-->>S: JPEG path (full resolution)
+    S->>Cam: startImageStream()
+    S->>S: faceRect = mapSensorRectToUpright(lastFrame box)
+    S->>N: processCapturedPhoto(path, faceRect, options)
+    N-->>S: {path, width, height, brightness, sharpness, cropApplied}
+    S-->>C: CapturedPhoto
+    C-->>App: CapturedPhoto
+```
+
+Design notes:
+
+- **Geometry**: `FaceFrame.faceBoundingBox` is in pixels of the raw sensor
+  frame (`frameWidth × frameHeight`, reported natively). It is normalized,
+  rotated by `sensorOrientation` (`mapSensorRectToUpright`) and, when
+  `mirror` is requested, flipped natively together with the image, so the
+  crop always follows the face.
+- **Quality metrics** are computed on the exact frame each MediaPipe result
+  belongs to: the engine keeps the NV21 bytes of in-flight frames keyed by
+  timestamp (bounded map) and measures brightness over the whole Y plane
+  and sharpness inside the face box when the result arrives. The same
+  `QualityMetrics` code measures the processed JPEG.
+- **Camera seam**: capture talks to the camera through
+  `CameraCaptureAdapter`; the default wraps `CameraController`, tests
+  inject a fake via `RawFaceGestureDetectorState.debugCaptureAdapter`.
+- **Stream handling**: `CaptureOptions.stopStreamWhileCapturing` (default
+  `true`) stops `startImageStream` around `takePicture()` and restarts it
+  in a `finally`, so the pipeline survives a failed capture.
 
 ---
 

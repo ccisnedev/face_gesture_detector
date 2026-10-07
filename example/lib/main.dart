@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:face_gesture_detector/face_gesture_detector.dart';
@@ -37,6 +39,13 @@ class _FaceDetectorDemoState extends State<FaceDetectorDemo>
   bool _isPaused = false;
   String? _error;
 
+  // ── Capture state ──────────────────────────────────────────
+  bool _autoCapture = false;
+  bool _capturing = false;
+  List<CaptureBlockReason> _blockReasons = const [CaptureBlockReason.noFace];
+  ImageQualityMetrics? _liveQuality;
+  CapturedPhoto? _lastPhoto;
+
   @override
   void initState() {
     super.initState();
@@ -73,9 +82,12 @@ class _FaceDetectorDemoState extends State<FaceDetectorDemo>
         orElse: () => cameras.first,
       );
 
+      // `high` (720p) keeps the analysis stream fluid while giving the
+      // sharpness metric enough detail; takePicture() always uses the
+      // full sensor resolution regardless of this preset.
       final controller = CameraController(
         front,
-        ResolutionPreset.medium,
+        ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.nv21,
       );
@@ -108,6 +120,34 @@ class _FaceDetectorDemoState extends State<FaceDetectorDemo>
     });
   }
 
+  Future<void> _capture() async {
+    if (_capturing || !_gestureController.isAttached) return;
+    setState(() => _capturing = true);
+    final started = DateTime.now();
+    try {
+      final photo = await _gestureController.capturePhoto(
+        options: const CaptureOptions(
+          cropToFace: true,
+          marginFactor: 0.6,
+          aspectRatio: 0.75,
+          targetShortSide: 1080,
+        ),
+      );
+      final elapsed = DateTime.now().difference(started).inMilliseconds;
+      _addEvent(
+        'Captured ${photo.width}×${photo.height} in ${elapsed}ms '
+        '(b=${photo.quality.brightness.toStringAsFixed(2)} '
+        's=${photo.quality.sharpness.toStringAsFixed(0)} '
+        'crop=${photo.cropApplied})',
+      );
+      setState(() => _lastPhoto = photo);
+    } catch (e) {
+      _addEvent('Capture failed: $e');
+    } finally {
+      if (mounted) setState(() => _capturing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -136,8 +176,9 @@ class _FaceDetectorDemoState extends State<FaceDetectorDemo>
       ),
       body: Column(
         children: [
-          Expanded(flex: 2, child: _buildCameraArea()),
-          Expanded(flex: 1, child: _buildEventLog()),
+          Expanded(flex: 3, child: _buildCameraArea()),
+          _buildCaptureBar(),
+          Expanded(flex: 2, child: _buildEventLog()),
         ],
       ),
     );
@@ -190,12 +231,133 @@ class _FaceDetectorDemoState extends State<FaceDetectorDemo>
           _addEvent('Brow raised (${details.intensity.toStringAsFixed(2)})'),
       onMouthOpened: (details) =>
           _addEvent('Mouth open (${details.openness.toStringAsFixed(2)})'),
-      onPoseChanged: (details) => _addEvent(
-        'Pose: p=${details.angles.pitch.toStringAsFixed(1)} y=${details.angles.yaw.toStringAsFixed(1)} r=${details.angles.roll.toStringAsFixed(1)}',
-      ),
       onDistanceChanged: (details) =>
           _addEvent('Distance: ${details.category.name}'),
-      child: CameraPreview(camera),
+      onQualityChanged: (details) {
+        // Live metrics for the status bar (no event log entry — too noisy).
+        setState(() => _liveQuality = details.metrics);
+      },
+      onCaptureBlocked: (details) {
+        setState(() => _blockReasons = details.reasons);
+        _addEvent(
+          details.isClear
+              ? 'Capture gates clear — hold still'
+              : 'Capture blocked: ${details.reasons.map((r) => r.name).join(', ')}',
+        );
+      },
+      onCaptureReady: (details) {
+        _addEvent(
+          'Capture ready (held ${details.sustainedFor.inMilliseconds}ms)',
+        );
+        if (_autoCapture) _capture();
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          CameraPreview(camera),
+          Positioned(
+            left: 8,
+            right: 8,
+            bottom: 8,
+            child: _buildGateOverlay(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGateOverlay() {
+    final q = _liveQuality;
+    final clear = _blockReasons.isEmpty;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            clear
+                ? 'Ready — hold still'
+                : _blockReasons.map((r) => r.name).join(' · '),
+            style: TextStyle(
+              color: clear ? Colors.greenAccent : Colors.orangeAccent,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          if (q != null)
+            Text(
+              'brightness ${q.brightness.toStringAsFixed(2)} · '
+              'sharpness ${q.sharpness.toStringAsFixed(0)}',
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCaptureBar() {
+    final photo = _lastPhoto;
+    return Material(
+      color: Colors.grey.shade200,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          children: [
+            FilledButton.icon(
+              onPressed: _capturing || _cameraController == null
+                  ? null
+                  : _capture,
+              icon: _capturing
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.camera_alt),
+              label: const Text('Capture'),
+            ),
+            const SizedBox(width: 12),
+            const Text('Auto'),
+            Switch(
+              value: _autoCapture,
+              onChanged: (v) => setState(() => _autoCapture = v),
+            ),
+            const Spacer(),
+            if (photo != null) ...[
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '${photo.width}×${photo.height}',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  Text(
+                    'b=${photo.quality.brightness.toStringAsFixed(2)} '
+                    's=${photo.quality.sharpness.toStringAsFixed(0)}',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: Image.file(
+                  File(photo.path),
+                  key: ValueKey(photo.path),
+                  width: 48,
+                  height: 64,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 

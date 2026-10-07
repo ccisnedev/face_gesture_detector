@@ -41,6 +41,15 @@ android {
             )
         }
     }
+
+    // 16 KB page-size support (Google Play requirement): native libraries
+    // must be stored uncompressed and page-aligned. This is the AGP 8.5.1+
+    // default when minSdk >= 23; stated explicitly so it cannot regress.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
 }
 
 flutter {

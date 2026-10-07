@@ -58,6 +58,8 @@ void main() {
           onBrowRaised: (_) {},
           onHeadTurnDetected: (_) {},
           onHeadNodDetected: (_) {},
+          onCaptureReady: (_) {},
+          onCaptureBlocked: (_) {},
           onFaceFrame: (_) {},
           child: SizedBox.shrink(),
         ),
@@ -67,8 +69,28 @@ void main() {
         find.byType(RawFaceGestureDetector),
       );
 
-      // Presence, Quality, Pose, Blink, Smile, Mouth, Brow, HeadTurn, HeadNod, RawFrame
-      expect(rawWidget.recognizers, hasLength(10));
+      // Presence, Quality, Pose, Blink, Smile, Mouth, Brow, HeadTurn,
+      // HeadNod, CaptureReady, RawFrame
+      expect(rawWidget.recognizers, hasLength(11));
+      expect(rawWidget.recognizers, contains(CaptureReadyRecognizer));
+    });
+
+    testWidgets('creates CaptureReadyRecognizer for either capture callback', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        FaceGestureDetector(
+          configuration: FaceGestureConfiguration(),
+          onCaptureBlocked: (_) {},
+          child: SizedBox.shrink(),
+        ),
+      );
+
+      final rawWidget = tester.widget<RawFaceGestureDetector>(
+        find.byType(RawFaceGestureDetector),
+      );
+
+      expect(rawWidget.recognizers.keys, [CaptureReadyRecognizer]);
     });
 
     testWidgets('forwards controller to RawFaceGestureDetector', (

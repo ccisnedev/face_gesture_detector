@@ -1,14 +1,17 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import '../configuration/face_gesture_configuration.dart';
 import '../controller/face_gesture_detector_controller.dart';
+import '../model/captured_photo.dart';
 import '../model/face_frame.dart';
 import '../platform/face_detection_options.dart';
 import '../platform/face_gesture_detector_platform_interface.dart';
+import '../util/rect_mapping.dart';
+import 'camera_capture_adapter.dart';
 import 'package:face_gesture_detector/src/recognizer/face_gesture_recognizer.dart';
 import 'package:face_gesture_detector/src/recognizer/face_gesture_recognizer_factory.dart';
 
@@ -21,7 +24,8 @@ import 'package:face_gesture_detector/src/recognizer/face_gesture_recognizer_fac
 /// When [cameraController] is provided, the widget manages the full pipeline:
 /// starts native detection, subscribes to the camera image stream, sends frames
 /// to native for processing, and dispatches the resulting [FaceFrame]s to all
-/// active recognizers.
+/// active recognizers. It also acts as the [FaceCaptureHost] of the
+/// [controller], enabling [FaceGestureDetectorController.capturePhoto].
 ///
 /// When [cameraController] is null (e.g. in tests), frames can be dispatched
 /// manually via [RawFaceGestureDetectorState.dispatchFrame].
@@ -32,14 +36,15 @@ class RawFaceGestureDetector extends StatefulWidget {
   /// Configuration forwarded to recognizers.
   final FaceGestureConfiguration configuration;
 
-  /// Optional controller for imperative pause/resume/reset.
+  /// Optional controller for imperative pause/resume/reset/capture.
   final FaceGestureDetectorController? controller;
 
   /// Camera controller that provides the image stream.
   ///
   /// Must be initialized before this widget mounts. The widget subscribes
   /// to [CameraController.startImageStream] and sends frames to the native
-  /// layer via [FaceGestureDetectorPlatform.processFrame].
+  /// layer via [FaceGestureDetectorPlatform.processFrame]. Frames must be
+  /// delivered as NV21 (`imageFormatGroup: ImageFormatGroup.nv21`).
   final CameraController? cameraController;
 
   /// Child widget, typically a camera preview.
@@ -59,20 +64,37 @@ class RawFaceGestureDetector extends StatefulWidget {
 }
 
 /// Public state so tests and advanced users can call [dispatchFrame].
-class RawFaceGestureDetectorState extends State<RawFaceGestureDetector> {
+class RawFaceGestureDetectorState extends State<RawFaceGestureDetector>
+    implements FaceCaptureHost {
   final Map<Type, FaceGestureRecognizer> _activeRecognizers = {};
   int _frameCounter = 0;
   StreamSubscription<Map<String, dynamic>>? _frameStreamSubscription;
   bool _isStreaming = false;
+  bool _isCapturing = false;
+
+  FaceFrame? _lastFrame;
+  int _lastImageWidth = 0;
+  int _lastImageHeight = 0;
+
+  /// Overrides the camera used by [capturePhoto]. Testing only.
+  @visibleForTesting
+  CameraCaptureAdapter? debugCaptureAdapter;
 
   FaceGestureDetectorPlatform get _platform =>
       FaceGestureDetectorPlatform.instance;
+
+  @override
+  FaceFrame? get lastFrame => _lastFrame;
+
+  /// Whether the widget is currently subscribed to the camera image stream.
+  bool get isStreaming => _isStreaming;
 
   @override
   void initState() {
     super.initState();
     _syncRecognizers(widget.recognizers);
     widget.controller?.addListener(_onControllerChanged);
+    widget.controller?.attach(this);
     if (widget.cameraController != null) {
       _startPipeline();
     }
@@ -84,7 +106,9 @@ class RawFaceGestureDetectorState extends State<RawFaceGestureDetector> {
 
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller?.removeListener(_onControllerChanged);
+      oldWidget.controller?.detach(this);
       widget.controller?.addListener(_onControllerChanged);
+      widget.controller?.attach(this);
     }
 
     if (!_mapsEqual(oldWidget.recognizers, widget.recognizers)) {
@@ -103,6 +127,7 @@ class RawFaceGestureDetectorState extends State<RawFaceGestureDetector> {
   void dispose() {
     _stopPipeline();
     widget.controller?.removeListener(_onControllerChanged);
+    widget.controller?.detach(this);
     for (final recognizer in _activeRecognizers.values) {
       recognizer.dispose();
     }
@@ -154,7 +179,10 @@ class RawFaceGestureDetectorState extends State<RawFaceGestureDetector> {
   /// Concatenates YUV420 planes into a single byte buffer and sends it
   /// to the native layer for MediaPipe processing.
   void _onCameraImage(CameraImage image) {
-    if (widget.controller?.isPaused ?? false) return;
+    _lastImageWidth = image.width;
+    _lastImageHeight = image.height;
+
+    if (_isCapturing || (widget.controller?.isPaused ?? false)) return;
 
     final bytes = _concatenatePlanes(image.planes);
     final rotation =
@@ -194,8 +222,12 @@ class RawFaceGestureDetectorState extends State<RawFaceGestureDetector> {
   /// Dispatches a [FaceFrame] to all active recognizers.
   ///
   /// Called internally when native frames arrive, or externally for testing.
+  /// The frame is remembered as [lastFrame] even when dispatch is paused,
+  /// so a capture always uses the most recent face box.
   void dispatchFrame(FaceFrame frame) {
-    if (widget.controller?.isPaused ?? false) return;
+    _lastFrame = frame;
+
+    if (_isCapturing || (widget.controller?.isPaused ?? false)) return;
 
     // Frame skipping: process 1 out of every (skipCount + 1) frames.
     final skipCount = widget.configuration.frameSkipCount;
@@ -211,6 +243,82 @@ class RawFaceGestureDetectorState extends State<RawFaceGestureDetector> {
       recognizer.addFaceFrame(frame);
     }
   }
+
+  // ── Photo capture ─────────────────────────────────────────────
+
+  /// Takes a picture with the camera and post-processes it natively.
+  ///
+  /// Prefer [FaceGestureDetectorController.capturePhoto], which guards
+  /// against concurrent captures. Frame dispatch is suspended while the
+  /// picture is taken; when [CaptureOptions.stopStreamWhileCapturing] is
+  /// set the image stream is stopped before `takePicture()` and restarted
+  /// afterwards, even if the capture fails.
+  @override
+  Future<CapturedPhoto> capturePhoto(CaptureOptions options) async {
+    final adapter = debugCaptureAdapter ??
+        (widget.cameraController != null
+            ? CameraControllerCaptureAdapter(widget.cameraController!)
+            : null);
+    if (adapter == null) {
+      throw StateError('capturePhoto() requires a cameraController.');
+    }
+    if (!adapter.isInitialized) {
+      throw StateError('The camera is not initialized.');
+    }
+
+    final frame = _lastFrame;
+    final sensorOrientation = adapter.sensorOrientation;
+    final restartStream = options.stopStreamWhileCapturing && _isStreaming;
+
+    _isCapturing = true;
+    String path;
+    try {
+      if (restartStream) {
+        await adapter.stopImageStream();
+        _isStreaming = false;
+      }
+      path = await adapter.takePicture().timeout(options.timeout);
+    } finally {
+      if (restartStream && !_isStreaming && mounted) {
+        try {
+          await adapter.startImageStream(_onCameraImage);
+          _isStreaming = true;
+        } catch (_) {
+          // Camera may have been disposed while capturing.
+        }
+      }
+      _isCapturing = false;
+    }
+
+    Rect? faceRect;
+    if (options.cropToFace && frame != null && frame.isFaceDetected) {
+      final w = frame.frameWidth > 0 ? frame.frameWidth : _lastImageWidth;
+      final h = frame.frameHeight > 0 ? frame.frameHeight : _lastImageHeight;
+      if (w > 0 && h > 0) {
+        final box = frame.faceBoundingBox;
+        final normalized = Rect.fromLTWH(
+          box.left / w,
+          box.top / h,
+          box.width / w,
+          box.height / h,
+        );
+        faceRect = mapSensorRectToUpright(normalized, sensorOrientation);
+      }
+    }
+
+    final capturedAt = DateTime.now();
+    final reply = await _platform
+        .processCapturedPhoto(options.toPlatformMap(path: path, faceRect: faceRect))
+        .timeout(options.timeout);
+    return CapturedPhoto.fromPlatformMap(
+      reply,
+      faceRect: faceRect,
+      pose: frame?.poseAngles,
+      capturedAt: capturedAt,
+    );
+  }
+
+  // ── Controller / recognizers ──────────────────────────────────
 
   void _onControllerChanged() {
     if (widget.controller?.isPaused ?? false) return;

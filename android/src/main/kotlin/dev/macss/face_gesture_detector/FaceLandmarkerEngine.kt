@@ -24,11 +24,28 @@ class FaceLandmarkerEngine(
     companion object {
         private const val TAG = "FaceLandmarkerEngine"
         private const val MODEL_ASSET = "models/face_landmarker.task"
+        private const val MAX_PENDING_FRAMES = 4
     }
+
+    /** Y plane of an NV21 frame (stride == width) with its dimensions. */
+    private class LumaPlane(val bytes: ByteArray, val width: Int, val height: Int)
 
     private var landmarker: FaceLandmarker? = null
     private var includeLandmarks = false
     @Volatile private var currentRotation: Int = 0
+
+    /**
+     * Luminance planes of the frames currently in flight, keyed by the
+     * timestamp passed to [detectAsync]. MediaPipe echoes that timestamp in
+     * the result, which lets [handleResult] compute quality metrics on the
+     * exact frame the landmarks came from. Bounded so a dropped result can
+     * never leak memory.
+     */
+    private val pendingLuma = object : LinkedHashMap<Long, LumaPlane>(8, 0.75f, false) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, LumaPlane>?): Boolean =
+            size > MAX_PENDING_FRAMES
+    }
+    private val pendingLock = Any()
 
     /**
      * Initializes the FaceLandmarker with the given detection options.
@@ -74,10 +91,48 @@ class FaceLandmarkerEngine(
         landmarker?.detectAsync(image, timestampMs)
     }
 
+    /**
+     * Same as [detectAsync], additionally keeping the NV21 bytes of the
+     * frame so that brightness and sharpness can be measured on it when
+     * the result arrives. [nv21] must hold at least `width * height` bytes
+     * (the Y plane comes first in NV21).
+     */
+    fun detectAsync(
+        image: MPImage,
+        timestampMs: Long,
+        rotation: Int,
+        nv21: ByteArray,
+        width: Int,
+        height: Int,
+    ) {
+        if (nv21.size >= width * height) {
+            synchronized(pendingLock) {
+                pendingLuma[timestampMs] = LumaPlane(nv21, width, height)
+            }
+        }
+        detectAsync(image, timestampMs, rotation)
+    }
+
     /** Releases the FaceLandmarker and all associated native resources. */
     fun close() {
         landmarker?.close()
         landmarker = null
+        synchronized(pendingLock) { pendingLuma.clear() }
+    }
+
+    private fun takeLuma(timestampMs: Long): LumaPlane? =
+        synchronized(pendingLock) { pendingLuma.remove(timestampMs) }
+
+    /**
+     * Brightness of the whole frame and sharpness of [region] (face box in
+     * frame pixels, or the centre when null). Returns null when the frame
+     * bytes are not available (legacy [detectAsync] overload).
+     */
+    private fun computeQuality(luma: LumaPlane?, region: PixelRect?): Pair<Double, Double>? {
+        if (luma == null) return null
+        val brightness = QualityMetrics.brightness(luma.bytes, luma.width, luma.height)
+        val sharpness = QualityMetrics.sharpness(luma.bytes, luma.width, luma.height, region)
+        return brightness to sharpness
     }
 
     /**
@@ -91,34 +146,46 @@ class FaceLandmarkerEngine(
     private fun handleResult(result: FaceLandmarkerResult, input: MPImage) {
         val faceLandmarks = result.faceLandmarks()
         val isFaceDetected = faceLandmarks.isNotEmpty()
+        val luma = takeLuma(result.timestampMs())
 
         val frameMap = if (!isFaceDetected) {
-            buildNoFaceMap(result.timestampMs())
+            buildNoFaceMap(result.timestampMs(), input, luma)
         } else {
-            buildFaceDetectedMap(result, input)
+            buildFaceDetectedMap(result, input, luma)
         }
 
         onResult(frameMap)
     }
 
-    private fun buildNoFaceMap(timestampMs: Long): Map<String, Any?> {
+    private fun buildNoFaceMap(
+        timestampMs: Long,
+        input: MPImage,
+        luma: LumaPlane?,
+    ): Map<String, Any?> {
+        val quality = computeQuality(luma, null)
         return mapOf(
             "timestamp" to timestampMs,
             "isFaceDetected" to false,
             "faceConfidence" to 0.0,
+            "frameWidth" to input.width,
+            "frameHeight" to input.height,
             "faceBoundingBox" to mapOf(
                 "left" to 0.0, "top" to 0.0, "width" to 0.0, "height" to 0.0,
             ),
             "poseAngles" to mapOf("pitch" to 0.0, "yaw" to 0.0, "roll" to 0.0),
             "blendshapes" to emptyMap<String, Double>(),
             "landmarks" to null,
-            "quality" to mapOf("brightness" to 0.0, "sharpness" to 0.0),
+            "quality" to mapOf(
+                "brightness" to (quality?.first ?: 0.0),
+                "sharpness" to (quality?.second ?: 0.0),
+            ),
         )
     }
 
     private fun buildFaceDetectedMap(
         result: FaceLandmarkerResult,
         input: MPImage,
+        luma: LumaPlane?,
     ): Map<String, Any?> {
         val landmarks = result.faceLandmarks()[0]
         val blendshapes = result.faceBlendshapes().orElse(null)?.get(0)
@@ -183,10 +250,20 @@ class FaceLandmarkerEngine(
         // minFaceDetectionConfidence threshold, so we report 1.0.
         val faceConfidence = 1.0
 
+        // Brightness over the whole frame, sharpness inside the face box.
+        val faceRegion = PixelRect(
+            minX.toInt(), minY.toInt(),
+            (maxX - minX).toInt().coerceAtLeast(1),
+            (maxY - minY).toInt().coerceAtLeast(1),
+        )
+        val quality = computeQuality(luma, faceRegion)
+
         return mapOf(
             "timestamp" to result.timestampMs(),
             "isFaceDetected" to true,
             "faceConfidence" to faceConfidence,
+            "frameWidth" to input.width,
+            "frameHeight" to input.height,
             "faceBoundingBox" to mapOf(
                 "left" to minX,
                 "top" to minY,
@@ -201,8 +278,8 @@ class FaceLandmarkerEngine(
             "blendshapes" to blendshapeMap,
             "landmarks" to landmarkList,
             "quality" to mapOf(
-                "brightness" to 0.5,  // TODO M3.7: compute from Y channel
-                "sharpness" to 100.0, // TODO M3.7: compute Laplacian variance
+                "brightness" to (quality?.first ?: 0.0),
+                "sharpness" to (quality?.second ?: 0.0),
             ),
         )
     }

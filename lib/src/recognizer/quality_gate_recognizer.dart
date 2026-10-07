@@ -44,9 +44,9 @@ class QualityGateRecognizer extends FaceGestureRecognizer {
       // Quality is always reported so the app can track real-time metrics.
       _hasEmittedQuality = true;
       final isSufficient =
-          frame.quality.brightness >= 0.3 &&
-          frame.quality.brightness <= 0.7 &&
-          frame.quality.sharpness >= 100.0;
+          frame.quality.brightness >= configuration.captureMinBrightness &&
+          frame.quality.brightness <= configuration.captureMaxBrightness &&
+          frame.quality.sharpness >= configuration.captureMinSharpness;
       onQualityChanged(
         QualityDetails(
           metrics: frame.quality,
@@ -70,7 +70,11 @@ class QualityGateRecognizer extends FaceGestureRecognizer {
 
   double _boundingBoxRatio(FaceFrame frame) {
     final bboxArea = frame.faceBoundingBox.width * frame.faceBoundingBox.height;
-    final frameArea = frameWidth * frameHeight;
+    // Prefer the real frame size reported by the native layer; fall back
+    // to the configured dimensions for hand-built frames.
+    final frameArea = frame.frameWidth > 0 && frame.frameHeight > 0
+        ? (frame.frameWidth * frame.frameHeight).toDouble()
+        : frameWidth * frameHeight;
     if (frameArea == 0) return 0;
     return bboxArea / frameArea;
   }

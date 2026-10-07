@@ -14,11 +14,20 @@ class FaceFrame {
   final Duration timestamp;
   final bool isFaceDetected;
   final double faceConfidence;
+
+  /// Bounding box of the face in **pixels of the raw camera frame**
+  /// (sensor orientation, not rotated). Normalize with [frameWidth] and
+  /// [frameHeight].
   final Rect faceBoundingBox;
   final PoseAngles poseAngles;
   final Map<FaceBlendshape, double> blendshapes;
   final List<FaceLandmark>? landmarks;
   final ImageQualityMetrics quality;
+
+  /// Size of the raw camera frame the box refers to. `0` when unknown
+  /// (frames built by hand or by an older native layer).
+  final int frameWidth;
+  final int frameHeight;
 
   const FaceFrame({
     required this.timestamp,
@@ -29,6 +38,8 @@ class FaceFrame {
     required this.blendshapes,
     required this.landmarks,
     required this.quality,
+    this.frameWidth = 0,
+    this.frameHeight = 0,
   });
 
   /// Deserializes a FaceFrame from the Map sent by the native platform channel.
@@ -62,6 +73,8 @@ class FaceFrame {
         brightness: (qualityMap['brightness'] as num).toDouble(),
         sharpness: (qualityMap['sharpness'] as num).toDouble(),
       ),
+      frameWidth: (map['frameWidth'] as num?)?.toInt() ?? 0,
+      frameHeight: (map['frameHeight'] as num?)?.toInt() ?? 0,
     );
   }
 
