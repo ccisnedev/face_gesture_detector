@@ -170,7 +170,7 @@ See [doc/architecture.md](doc/architecture.md) for full details.
 
 ## Status
 
-> **v0.3.0** — Face gesture detection, capture gates and full-resolution photo capture on Android; Google Play 16 KB compliant.
+> **v0.3.1** — Face gesture detection, capture gates and full-resolution photo capture on Android; Google Play 16 KB compliant.
 
 - [x] Data model with 52 blendshapes, landmarks, pose angles, frame size
 - [x] Platform interface (MethodChannel + EventChannel + processFrame + processCapturedPhoto)
