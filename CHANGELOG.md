@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.3.1
+
+### Fixed
+- Android: stopping the detector (or starting it again without a stop) while a frame was being processed closed the MediaPipe landmarker from the main thread under the running detection and crashed the process (SIGSEGV in `nativeCreateRgbaImage`). The engine is now detached first and closed on the background executor, after the in-flight frame; later frames find no engine and are skipped. A start without a prior stop no longer leaks the previous engine.
+
 ## 0.3.0
 
 Photo capture, real image-quality metrics and Google Play 16 KB compliance.

@@ -28,7 +28,8 @@ class FaceGestureDetectorPlugin : FlutterPlugin, MethodCallHandler {
     private val streamHandler = FaceFrameStreamHandler()
     private val frameBuffer = SingleSlotFrameBuffer<RawFrame>()
 
-    private var engine: FaceLandmarkerEngine? = null
+    // Read on the background executor, written on the main thread.
+    @Volatile private var engine: FaceLandmarkerEngine? = null
     private var backgroundExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isRunning = false
@@ -63,10 +64,14 @@ class FaceGestureDetectorPlugin : FlutterPlugin, MethodCallHandler {
         val confidence = (call.argument<Double>("faceDetectionConfidence") ?: 0.5).toFloat()
         val includeLandmarks = call.argument<Boolean>("includeLandmarks") ?: false
 
-        engine = FaceLandmarkerEngine(applicationContext) { frameMap ->
+        // A start without a prior stop must not leak the previous engine.
+        stopEngine()
+
+        val newEngine = FaceLandmarkerEngine(applicationContext) { frameMap ->
             streamHandler.emit(frameMap)
         }
-        engine?.initialize(confidence, includeLandmarks)
+        newEngine.initialize(confidence, includeLandmarks)
+        engine = newEngine
         isRunning = true
 
         result.success(null)
@@ -169,10 +174,21 @@ class FaceGestureDetectorPlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
+    /**
+     * Detaches the engine and closes it on the background executor.
+     *
+     * The executor may be inside [FaceLandmarkerEngine.detectAsync] with a
+     * frame submitted before the stop. Closing the landmarker from the main
+     * thread at that moment frees the native graph under MediaPipe and
+     * crashes the process (SIGSEGV in nativeCreateRgbaImage). Queuing the
+     * close behind that frame serializes both, and tasks that run after it
+     * find [engine] null and skip the frame.
+     */
     private fun stopEngine() {
         isRunning = false
-        engine?.close()
+        val oldEngine = engine ?: return
         engine = null
+        backgroundExecutor.submit { oldEngine.close() }
     }
 }
 
